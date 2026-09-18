@@ -1,0 +1,678 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: KINECTRA API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: session
+    description: Analysis session operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /session/start:
+    post:
+      operationId: startSession
+      tags: [session]
+      summary: Start an analysis session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionInput"
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+
+  /session/{sessionId}/end:
+    post:
+      operationId: endSession
+      tags: [session]
+      summary: End an analysis session and get summary
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionEndInput"
+      responses:
+        "200":
+          description: Session ended with summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSummary"
+
+  /session/{sessionId}:
+    get:
+      operationId: getSession
+      tags: [session]
+      summary: Get session results
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSummary"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /session:
+    get:
+      operationId: listSessions
+      tags: [session]
+      summary: List recent sessions
+      responses:
+        "200":
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionSummary"
+
+  /session/speech/synthesize:
+    get:
+      operationId: synthesizeSpeech
+      tags: [session]
+      summary: Synthesize text to speech
+      parameters:
+        - name: text
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Audio stream binary response
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+
+  /poses/search:
+    post:
+      operationId: searchPoses
+      tags: [session]
+      summary: Find matching professional pose
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PoseSearchInput"
+      responses:
+        "200":
+          description: Matching professional pose details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoseMatch"
+
+  /poses/ingest:
+    post:
+      operationId: ingestPoses
+      tags: [session]
+      summary: Seed Qdrant collection with professional poses
+      responses:
+        "200":
+          description: Ingestion status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+
+  /signature-moves:
+    get:
+      operationId: getSignatureMoves
+      tags: [signature]
+      summary: Retrieve list of signature moves
+      responses:
+        "200":
+          description: List of moves
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SignatureMove"
+
+  /signature-moves/{id}:
+    get:
+      operationId: getSignatureMoveDetails
+      tags: [signature]
+      summary: Retrieve specific move details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Move details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignatureMove"
+
+  /signature-analysis/start:
+    post:
+      operationId: startSignatureAnalysis
+      tags: [signature]
+      summary: Start a signature analysis session
+      requestBody:
+        required: true
+        content:
+          application/json:
+             schema:
+               $ref: "#/components/schemas/StartSignatureAnalysisInput"
+      responses:
+        "201":
+          description: Analysis session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  athleteName:
+                    type: string
+                  referenceMoveId:
+                    type: string
+
+  /signature-analysis/upload:
+    post:
+      operationId: uploadSignatureVideo
+      tags: [signature]
+      summary: Upload athlete video for analysis
+      responses:
+        "200":
+          description: Upload status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  videoName:
+                    type: string
+
+  /signature-analysis/process:
+    post:
+      operationId: processSignatureAnalysis
+      tags: [signature]
+      summary: Match and calculate signature move score
+      requestBody:
+        required: true
+        content:
+          application/json:
+             schema:
+               $ref: "#/components/schemas/ProcessSignatureAnalysisInput"
+      responses:
+        "200":
+          description: Analysis scores and results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  sessionId:
+                    type: string
+                  overallScore:
+                    type: number
+                  similarity:
+                    type: number
+                  accuracy:
+                    type: number
+                  timing:
+                    type: number
+                  stability:
+                    type: number
+
+  /signature-analysis/{sessionId}:
+    get:
+      operationId: getSignatureSession
+      tags: [signature]
+      summary: Get signature session details
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignatureSession"
+
+  /signature-analysis/{sessionId}/trajectory:
+    get:
+      operationId: getSignatureTrajectory
+      tags: [signature]
+      summary: Get aligned frame comparisons
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Aligned frames list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /signature-analysis/history:
+    get:
+      operationId: getSignatureHistory
+      tags: [signature]
+      summary: Get recent signature sessions
+      responses:
+        "200":
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SignatureSession"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    SessionInput:
+      type: object
+      required:
+        - athleteName
+        - analysisType
+        - skillLevel
+        - dominantHand
+      properties:
+        athleteName:
+          type: string
+        analysisType:
+          type: string
+          enum: [bowling, batting, basketball, badminton]
+        skillLevel:
+          type: string
+          enum: [beginner, intermediate, advanced, professional]
+        dominantHand:
+          type: string
+          enum: [right, left]
+
+    Session:
+      type: object
+      required:
+        - id
+        - athleteName
+        - analysisType
+        - skillLevel
+        - dominantHand
+        - createdAt
+        - status
+      properties:
+        id:
+          type: string
+        athleteName:
+          type: string
+        analysisType:
+          type: string
+          enum: [bowling, batting, basketball, badminton]
+        skillLevel:
+          type: string
+          enum: [beginner, intermediate, advanced, professional]
+        dominantHand:
+          type: string
+          enum: [right, left]
+        createdAt:
+          type: string
+        status:
+          type: string
+          enum: [active, completed]
+
+    SessionEndInput:
+      type: object
+      required:
+        - frameCount
+        - avgPostureScore
+        - avgAlignmentScore
+        - avgStabilityScore
+        - avgEfficiencyScore
+        - overallScore
+        - warnings
+      properties:
+        frameCount:
+          type: integer
+        avgPostureScore:
+          type: number
+        avgAlignmentScore:
+          type: number
+        avgStabilityScore:
+          type: number
+        avgEfficiencyScore:
+          type: number
+        overallScore:
+          type: number
+        warnings:
+          type: array
+          items:
+            type: string
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/Snapshot"
+
+    SessionSummary:
+      type: object
+      required:
+        - id
+        - athleteName
+        - analysisType
+        - skillLevel
+        - dominantHand
+        - createdAt
+        - status
+        - frameCount
+        - avgPostureScore
+        - avgAlignmentScore
+        - avgStabilityScore
+        - avgEfficiencyScore
+        - overallScore
+        - strengths
+        - improvements
+        - recommendations
+        - warnings
+      properties:
+        id:
+          type: string
+        athleteName:
+          type: string
+        analysisType:
+          type: string
+          enum: [bowling, batting, basketball, badminton]
+        skillLevel:
+          type: string
+          enum: [beginner, intermediate, advanced, professional]
+        dominantHand:
+          type: string
+          enum: [right, left]
+        createdAt:
+          type: string
+        status:
+          type: string
+          enum: [active, completed]
+        frameCount:
+          type: integer
+        avgPostureScore:
+          type: number
+        avgAlignmentScore:
+          type: number
+        avgStabilityScore:
+          type: number
+        avgEfficiencyScore:
+          type: number
+        overallScore:
+          type: number
+        strengths:
+          type: array
+          items:
+            type: string
+        improvements:
+          type: array
+          items:
+            type: string
+        recommendations:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/Snapshot"
+
+    Snapshot:
+      type: object
+      required:
+        - src
+        - label
+        - time
+      properties:
+        src:
+          type: string
+        label:
+          type: string
+        time:
+          type: string
+        category:
+          type: string
+        metrics:
+          type: object
+          properties:
+            elbowAngle:
+              type: number
+            spineTilt:
+              type: number
+            kneeAngle:
+              type: number
+            shoulderAlignment:
+              type: number
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+
+    PoseMatch:
+      type: object
+      required:
+        - matchName
+        - similarity
+        - role
+        - description
+        - idealVector
+      properties:
+        matchName:
+          type: string
+        similarity:
+          type: number
+        role:
+          type: string
+        description:
+          type: string
+        idealVector:
+          type: array
+          items:
+            type: number
+
+    PoseSearchInput:
+      type: object
+      required:
+        - analysisType
+        - poseVector
+      properties:
+        analysisType:
+          type: string
+          enum: [batting, bowling]
+        poseVector:
+          type: array
+          items:
+            type: number
+
+    SignatureMove:
+      type: object
+      required:
+        - id
+        - playerName
+        - moveName
+        - category
+        - focusAreas
+        - difficulty
+        - description
+        - referencePoseSequenceJson
+      properties:
+        id:
+          type: string
+        playerName:
+          type: string
+        moveName:
+          type: string
+        category:
+          type: string
+        focusAreas:
+          type: array
+          items:
+            type: string
+        difficulty:
+          type: string
+        description:
+          type: string
+        referencePoseSequenceJson:
+          type: string
+
+    SignatureSession:
+      type: object
+      required:
+        - id
+        - userId
+        - athleteName
+        - referenceMoveId
+        - timestamp
+        - score
+        - trajectorySimilarity
+        - biomechanicalAccuracy
+        - timingScore
+        - stabilityScore
+        - warnings
+        - analysisDataJson
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        athleteName:
+          type: string
+        referenceMoveId:
+          type: string
+        timestamp:
+          type: string
+        score:
+          type: number
+        trajectorySimilarity:
+          type: number
+        biomechanicalAccuracy:
+          type: number
+        timingScore:
+          type: number
+        stabilityScore:
+          type: number
+        warnings:
+          type: array
+          items:
+            type: string
+        analysisDataJson:
+          type: string
+
+    StartSignatureAnalysisInput:
+      type: object
+      required:
+        - athleteName
+        - referenceMoveId
+      properties:
+        athleteName:
+          type: string
+        referenceMoveId:
+          type: string
+        userId:
+          type: string
+
+    ProcessSignatureAnalysisInput:
+      type: object
+      required:
+        - sessionId
+        - referenceMoveId
+        - poseSequence
+      properties:
+        sessionId:
+          type: string
+        referenceMoveId:
+          type: string
+        athleteName:
+          type: string
+        userId:
+          type: string
+        poseSequence:
+          type: array
+          items:
+            type: object
