@@ -18,6 +18,8 @@ import {
   PhoneOff,
   MessageSquare,
   Radio,
+  Download,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -85,7 +87,8 @@ export default function Analysis() {
     }
   }, [metrics, isModelLoading]);
 
-  const [snapshots, setSnapshots] = useState<{ src: string; label: string; time: string; category: "deviation" | "optimal" }[]>([]);
+  const [snapshots, setSnapshots] = useState<{ src: string; label: string; time: string; category: "deviation" | "optimal"; metrics?: any }[]>([]);
+  const [previewSnapshot, setPreviewSnapshot] = useState<{ src: string; label: string; time: string; metrics?: any } | null>(null);
   const [showGlowPulse, setShowGlowPulse] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -132,16 +135,8 @@ export default function Analysis() {
   });
 
   const lastCapturedTimeRef = useRef<number>(0);
-  const lastStateRef = useRef<{
-    lastElbowAngle: number;
-    lastSpineTilt: number;
-    lastKneeAngle: number;
-  }>({ lastElbowAngle: 0, lastSpineTilt: 0, lastKneeAngle: 0 });
-
-  // Peak-Reversal (Inflection Point) History logs
-  const elbowHistoryRef = useRef<number[]>([]);
-  const spineHistoryRef = useRef<number[]>([]);
-  const kneeHistoryRef = useRef<number[]>([]);
+  const lastSampleTimeRef = useRef<number>(0);
+  const movementHistoryRef = useRef<{ time: number; elbow: number; knee: number; spine: number; shoulder: number }[]>([]);
 
   // Blends webcam video feed and pose skeleton canvas onto an offline context
   const captureSnapshot = useCallback((eventLabel: string) => {
@@ -150,82 +145,85 @@ export default function Analysis() {
         const video = videoRef.current;
         const canvas = canvasRef.current;
         
-        let w = video.videoWidth;
-        let h = video.videoHeight;
-        let isMock = false;
+        const rawW = video.videoWidth || 640;
+        const rawH = video.videoHeight || 480;
+        const isMock = !video.videoWidth || video.readyState < 2;
         
-        if (!w || !h || video.readyState < 2) {
-          w = 640;
-          h = 480;
-          isMock = true;
-        }
+        // Normalize resolution to 640px max dimension (ultra-fast, sharp, avoids sessionStorage quota crashes)
+        const targetW = 640;
+        const targetH = Math.round(640 * (rawH / rawW)) || 360;
         
         const tempCanvas = document.createElement("canvas");
-        tempCanvas.width = w;
-        tempCanvas.height = h;
+        tempCanvas.width = targetW;
+        tempCanvas.height = targetH;
         
         const tCtx = tempCanvas.getContext("2d");
         if (tCtx) {
-          // Hardware-accelerated sharpening filters to heighten edge clarity and skeletal margins
-          tCtx.filter = "contrast(1.08) brightness(1.02) saturate(1.05)";
+          tCtx.filter = "contrast(1.06) brightness(1.02) saturate(1.04)";
           
           if (isMock) {
-            // Draw a high-fidelity dark sports telemetry backdrop for mock testing
+            // Draw dark telemetry background for mock/simulated testing
             tCtx.fillStyle = "#090d16";
-            tCtx.fillRect(0, 0, w, h);
+            tCtx.fillRect(0, 0, targetW, targetH);
             
-            // Draw biomechanical telemetry grid lines
             tCtx.strokeStyle = "rgba(14, 165, 233, 0.15)";
             tCtx.lineWidth = 1;
-            for (let x = 40; x < w; x += 40) {
-              tCtx.beginPath(); tCtx.moveTo(x, 0); tCtx.lineTo(x, h); tCtx.stroke();
+            for (let x = 40; x < targetW; x += 40) {
+              tCtx.beginPath(); tCtx.moveTo(x, 0); tCtx.lineTo(x, targetH); tCtx.stroke();
             }
-            for (let y = 40; y < h; y += 40) {
-              tCtx.beginPath(); tCtx.moveTo(0, y); tCtx.lineTo(w, y); tCtx.stroke();
+            for (let y = 40; y < targetH; y += 40) {
+              tCtx.beginPath(); tCtx.moveTo(0, y); tCtx.lineTo(targetW, y); tCtx.stroke();
             }
             
-            // Telemetry alignment logs omitted for clean visual snapshots
-            
-            // Draw a stick figure skeleton
             tCtx.strokeStyle = "#0ea5e9";
             tCtx.lineWidth = 4;
             tCtx.lineCap = "round";
-            // Head
-            tCtx.beginPath(); tCtx.arc(w / 2, 140, 22, 0, Math.PI * 2); tCtx.stroke();
-            // Spine
-            tCtx.beginPath(); tCtx.moveTo(w / 2, 162); tCtx.lineTo(w / 2, 280); tCtx.stroke();
-            // Shoulders
-            tCtx.beginPath(); tCtx.moveTo(w / 2 - 50, 190); tCtx.lineTo(w / 2 + 50, 190); tCtx.stroke();
-            // Hips
-            tCtx.beginPath(); tCtx.moveTo(w / 2 - 30, 280); tCtx.lineTo(w / 2 + 30, 280); tCtx.stroke();
-            // Joints
-            tCtx.strokeStyle = "#e11d48";
-            tCtx.beginPath(); tCtx.arc(w / 2 - 50, 190, 5, 0, Math.PI * 2); tCtx.stroke();
-            tCtx.beginPath(); tCtx.arc(w / 2 + 50, 190, 5, 0, Math.PI * 2); tCtx.stroke();
+            tCtx.beginPath(); tCtx.arc(targetW / 2, 110, 20, 0, Math.PI * 2); tCtx.stroke();
+            tCtx.beginPath(); tCtx.moveTo(targetW / 2, 130); tCtx.lineTo(targetW / 2, 220); tCtx.stroke();
+            tCtx.beginPath(); tCtx.moveTo(targetW / 2 - 40, 150); tCtx.lineTo(targetW / 2 + 40, 150); tCtx.stroke();
+            tCtx.beginPath(); tCtx.moveTo(targetW / 2 - 25, 220); tCtx.lineTo(targetW / 2 + 25, 220); tCtx.stroke();
           } else {
-            // Mirror context for camera matches
-            tCtx.translate(w, 0);
-            tCtx.scale(-1, 1);
-            tCtx.drawImage(video, 0, 0, w, h);
+            const isMirrored = config.analysisMode !== "upload";
+            tCtx.save();
+            if (isMirrored) {
+              tCtx.translate(targetW, 0);
+              tCtx.scale(-1, 1);
+            }
+            tCtx.drawImage(video, 0, 0, targetW, targetH);
+            
+            if (canvas && canvas.width > 0 && canvas.height > 0) {
+              tCtx.drawImage(canvas, 0, 0, targetW, targetH);
+            }
+            tCtx.restore();
           }
           
-          if (!isMock) {
-            tCtx.drawImage(canvas, 0, 0, w, h);
-          }
+          // Draw high-visibility telemetry HUD stamp at the bottom
+          tCtx.filter = "none";
+          tCtx.fillStyle = "rgba(15, 23, 42, 0.85)";
+          tCtx.fillRect(0, targetH - 30, targetW, 30);
           
-          const dataUrl = tempCanvas.toDataURL("image/webp", 0.7);
-          const elapsed = `${Math.floor(frameCount)}s`;
+          tCtx.fillStyle = "#f97316";
+          tCtx.font = "bold 11px Inter, sans-serif";
+          tCtx.fillText("KINECTRA LABS", 12, targetH - 10);
           
-          // Set optimal category and use the objective athletic event name as displayLabel
-          const category: "deviation" | "optimal" = "optimal";
           const displayLabel = eventLabel === "Stance Balance" ? "Stance Check" : eventLabel;
+          tCtx.fillStyle = "rgba(255, 255, 255, 0.9)";
+          tCtx.font = "10px monospace";
+          tCtx.fillText(
+            `• ${displayLabel} | Elbow: ${Math.round(smoothedMetrics.elbowAngle)}° | Knee: ${Math.round(smoothedMetrics.kneeAngle)}° | Spine: ${Math.round(smoothedMetrics.spineTilt)}°`,
+            115,
+            targetH - 10
+          );
+          
+          const dataUrl = tempCanvas.toDataURL("image/webp", 0.8);
+          const elapsed = `${Math.floor(frameCount)}s`;
           
           setSnapshots((prev) => {
             const updated = [...prev, { 
               src: dataUrl, 
               label: displayLabel, 
               time: elapsed, 
-              category,
+              category: "optimal" as const,
               metrics: {
                 elbowAngle: Math.round(smoothedMetrics.elbowAngle),
                 spineTilt: Math.round(smoothedMetrics.spineTilt),
@@ -265,225 +263,154 @@ export default function Analysis() {
             else if (eventLabel === "Follow-through") setActiveSuggestion("Start Batting Stance");
           }
           
-          // Stealth pulse feedback (emerald glowing card border instead of full screen flash)
-
           setShowGlowPulse(true);
           setTimeout(() => setShowGlowPulse(false), 350);
 
           toast({
-            title: `🎯 ${eventLabel} Captured`,
-            description: `Movement freeze frame logged at ${elapsed}.`,
+            title: `📸 ${displayLabel} Captured`,
+            description: `Telemetry snapshot logged at ${elapsed}.`,
           });
         }
       } catch (e) {
         console.error("Failed to capture snapshot frame", e);
       }
     }
-  }, [config.sessionId, config.dominantHand, frameCount, toast, smoothedMetrics]);
+  }, [config.sessionId, config.dominantHand, config.analysisMode, frameCount, toast, smoothedMetrics]);
 
-  // Hook to monitor smoothed metrics and trigger snapshot capture on peak events (3-Frame Sliding Window)
+  // Hook to monitor smoothed metrics and trigger snapshot capture on athletic phase transitions
   useEffect(() => {
-    const { elbowAngle, spineTilt, kneeAngle, shoulderAlignment } = smoothedMetrics;
+    const { elbowAngle, spineTilt, kneeAngle, shoulderAlignment, bodyDetected } = smoothedMetrics;
     const now = Date.now();
     
-    // Cooldown check (minimum 2.2s spacing to capture quick sequential movements)
-    if (now - lastCapturedTimeRef.current < 2200) return;
+    // Minimum 2.5s spacing between automatic snapshots
+    if (now - lastCapturedTimeRef.current < 2500) return;
 
-    // 1. Maintain sliding window of metrics histories
-    elbowHistoryRef.current.push(elbowAngle);
-    if (elbowHistoryRef.current.length > 3) elbowHistoryRef.current.shift();
+    // Only sample if person is detected in frame or has valid joint angles
+    if (!bodyDetected && elbowAngle === 0) return;
 
-    spineHistoryRef.current.push(spineTilt);
-    if (spineHistoryRef.current.length > 3) spineHistoryRef.current.shift();
+    // Sample metrics every ~150ms instead of every raw animation frame
+    if (now - lastSampleTimeRef.current < 150) return;
+    lastSampleTimeRef.current = now;
 
-    kneeHistoryRef.current.push(kneeAngle);
-    if (kneeHistoryRef.current.length > 3) kneeHistoryRef.current.shift();
+    movementHistoryRef.current.push({
+      time: now,
+      elbow: elbowAngle,
+      knee: kneeAngle,
+      spine: spineTilt,
+      shoulder: shoulderAlignment,
+    });
+    if (movementHistoryRef.current.length > 12) movementHistoryRef.current.shift();
 
-    // 2. Perform peak-reversal inflection point checks across 4 athletic phases
+    if (movementHistoryRef.current.length < 3) return;
+
+    const history = movementHistoryRef.current;
+    const current = history[history.length - 1];
+    const prev = history[history.length - 2];
+    const past = history[0];
+
     let triggerAction = false;
     let eventLabel = "";
 
     if (config.analysisType === "bowling") {
-      // 0. Bowling Stance (Bowler starting stance position)
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        // Trough check: elbow holds bent loading position stably at setup (seated friendly)
-        const isStance = v1 > 45 && v1 < 105 && v1 < v0 - 3.0 && v2 > v1 + 3.0;
-        if (isStance) {
-          triggerAction = true;
-          eventLabel = "Bowling Stance";
-          elbowHistoryRef.current = [];
-        }
-      }
-
-      // 1. Setup Load (Elbow flexion peak in cocked position)
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        // Require a 4.5-degree inflection change to avoid noise triggers
-        const isSetup = v1 > 40 && v1 < 90 && spineTilt < 10 && v1 < v0 - 4.5 && v2 > v1 + 4.5;
-        if (isSetup) {
+      // 1. Setup Load (Elbow deeply flexed/cocked at chest/chin)
+      if (current.elbow >= 50 && current.elbow <= 95 && current.spine < 14) {
+        if (Math.abs(current.elbow - prev.elbow) < 6 && past.elbow > current.elbow + 8) {
           triggerAction = true;
           eventLabel = "Setup Load";
-          elbowHistoryRef.current = [];
         }
       }
-
-      // 2. Landing Plant (Knee flexion plant impact)
-      if (kneeHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = kneeHistoryRef.current;
-        const isPlant = v1 > 100 && v1 <= 145 && v1 < v0 - 4.0 && v2 > v1 + 4.0;
-        if (isPlant) {
-          triggerAction = true;
-          eventLabel = "Landing Plant";
-          kneeHistoryRef.current = [];
-        }
+      // 2. Bowling Release (Arm reaching full overhead extension)
+      else if (current.elbow >= 152 && past.elbow < 135) {
+        triggerAction = true;
+        eventLabel = "Bowling Release";
       }
-
-      // 3. Bowling Release Point (Peak Arm Extension)
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        const isPeak = v1 >= 148 && v1 > v0 + 4.5 && v2 < v1 - 4.5;
-        if (isPeak) {
-          triggerAction = true;
-          eventLabel = "Bowling Release";
-          elbowHistoryRef.current = [];
-        }
+      // 3. Landing Plant (Front landing knee bracing impact)
+      else if (current.knee > 0 && current.knee >= 115 && current.knee <= 145 && past.knee > current.knee + 8) {
+        triggerAction = true;
+        eventLabel = "Landing Plant";
       }
-
-      // 4. Delivery Drive (Peak Spine Forward Tilt)
-      if (spineHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = spineHistoryRef.current;
-        const isPeak = v1 >= 18 && v1 > v0 + 3.0 && v2 < v1 - 3.0;
-        if (isPeak) {
+      // 4. Delivery Drive (Forward spine flexion follow-through)
+      else if (current.spine >= 18 && past.spine < 12) {
+        triggerAction = true;
+        eventLabel = "Delivery Drive";
+      }
+      // 5. Bowling Stance
+      else if (current.elbow >= 80 && current.elbow <= 130 && current.spine < 12 && Math.abs(current.elbow - past.elbow) < 5) {
+        if (now - lastCapturedTimeRef.current > 7000) {
           triggerAction = true;
-          eventLabel = "Delivery Drive";
-          spineHistoryRef.current = [];
+          eventLabel = "Bowling Stance";
         }
       }
     } else if (config.analysisType === "basketball") {
       // 1. Prep Dip
-      if (kneeHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = kneeHistoryRef.current;
-        const isDip = v1 >= 110 && v1 <= 135 && v1 < v0 - 3.5 && v2 > v1 + 3.5;
-        if (isDip) {
-          triggerAction = true;
-          eventLabel = "Prep Dip";
-          kneeHistoryRef.current = [];
-        }
+      if (current.knee > 0 && current.knee >= 105 && current.knee <= 135 && past.knee > current.knee + 8) {
+        triggerAction = true;
+        eventLabel = "Prep Dip";
       }
-
       // 2. Release Extension
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        const isRelease = v1 >= 155 && v1 > v0 + 4.0 && v2 < v1 - 4.0;
-        if (isRelease) {
-          triggerAction = true;
-          eventLabel = "Release Extension";
-          elbowHistoryRef.current = [];
-        }
+      else if (current.elbow >= 155 && past.elbow < 130) {
+        triggerAction = true;
+        eventLabel = "Release Extension";
       }
-
       // 3. Follow-Through
-      if (spineHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = spineHistoryRef.current;
-        const isStabilized = v1 < 8 && v1 < v0 - 2.5 && v2 > v1 + 2.5;
-        if (isStabilized) {
-          triggerAction = true;
-          eventLabel = "Follow-Through";
-          spineHistoryRef.current = [];
-        }
+      else if (current.spine < 8 && past.elbow >= 150) {
+        triggerAction = true;
+        eventLabel = "Follow-Through";
       }
     } else if (config.analysisType === "badminton") {
       // 1. Preparation Loading (Arch)
-      if (spineHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = spineHistoryRef.current;
-        const isArch = v1 >= 15 && v1 > v0 + 3.0 && v2 < v1 - 3.0;
-        if (isArch) {
-          triggerAction = true;
-          eventLabel = "Preparation Loading";
-          spineHistoryRef.current = [];
-        }
+      if (current.spine >= 15 && past.spine < 10) {
+        triggerAction = true;
+        eventLabel = "Preparation Loading";
       }
-
       // 2. Impact Contact
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        const isImpact = v1 >= 150 && v1 > v0 + 4.0 && v2 < v1 - 4.0;
-        if (isImpact) {
-          triggerAction = true;
-          eventLabel = "Impact Contact";
-          elbowHistoryRef.current = [];
-        }
+      else if (current.elbow >= 150 && past.elbow < 130) {
+        triggerAction = true;
+        eventLabel = "Impact Contact";
       }
-
       // 3. Recovery Lunge
-      if (kneeHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = kneeHistoryRef.current;
-        const isLunge = v1 >= 115 && v1 <= 140 && v1 < v0 - 4.0 && v2 > v1 + 4.0;
-        if (isLunge) {
-          triggerAction = true;
-          eventLabel = "Recovery Lunge";
-          kneeHistoryRef.current = [];
-        }
+      else if (current.knee > 0 && current.knee >= 110 && current.knee <= 140) {
+        triggerAction = true;
+        eventLabel = "Recovery Lunge";
       }
     } else {
-      // 1. Stance Setup (Balanced crouched waiting stance)
-      if (kneeHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = kneeHistoryRef.current;
-        const isSetupStance = v1 >= 135 && v1 <= 150 && spineTilt >= 12 && spineTilt <= 18 && v1 < v0 - 3.5 && v2 > v1 + 3.5;
-        if (isSetupStance) {
+      // Batting:
+      // 1. High Backlift
+      if (current.elbow >= 45 && current.elbow <= 95 && current.shoulder > 14 && past.elbow > current.elbow + 6) {
+        triggerAction = true;
+        eventLabel = "High Backlift";
+      }
+      // 2. Front-foot Drive
+      else if (current.knee > 0 && current.knee <= 135 && past.knee > current.knee + 8) {
+        triggerAction = true;
+        eventLabel = "Front-foot Drive";
+      }
+      // 3. Follow-through
+      else if (current.spine < 10 && current.elbow > 130 && past.spine > 14) {
+        triggerAction = true;
+        eventLabel = "Follow-through";
+      }
+      // 4. Stance Setup
+      else if (current.knee >= 135 && current.knee <= 155 && current.spine >= 10 && current.spine <= 20) {
+        if (now - lastCapturedTimeRef.current > 7000) {
           triggerAction = true;
           eventLabel = "Stance Setup";
-          kneeHistoryRef.current = [];
-        }
-      }
-
-      // 2. High Backlift (Peak of shoulder rotation / bat lift)
-      if (elbowHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = elbowHistoryRef.current;
-        const isBacklift = v1 > 40 && v1 < 90 && shoulderAlignment > 15 && v1 < v0 - 4.0 && v2 > v1 + 4.0;
-        if (isBacklift) {
-          triggerAction = true;
-          eventLabel = "High Backlift";
-          elbowHistoryRef.current = [];
-        }
-      }
-
-      // 3. Contact Flexion (Front-foot Drive Lunge apex)
-      if (kneeHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = kneeHistoryRef.current;
-        const isTrough = v1 > 0 && v1 <= 135 && v1 < v0 - 4.5 && v2 > v1 + 4.5;
-        if (isTrough) {
-          triggerAction = true;
-          eventLabel = "Front-foot Drive";
-          kneeHistoryRef.current = [];
-        }
-      }
-
-      // 4. Follow-through (Spine recovery to upright post-lunge)
-      if (spineHistoryRef.current.length === 3 && !triggerAction) {
-        const [v0, v1, v2] = spineHistoryRef.current;
-        const isFollowThrough = v1 < 10 && v1 < v0 - 3.0 && v2 > v1 + 3.0;
-        if (isFollowThrough) {
-          triggerAction = true;
-          eventLabel = "Follow-through";
-          spineHistoryRef.current = [];
         }
       }
     }
 
-    lastStateRef.current = {
-      lastElbowAngle: elbowAngle,
-      lastSpineTilt: spineTilt,
-      lastKneeAngle: kneeAngle,
-    };
+    // Periodic technique snapshot if active motion is detected but no specific phase fired in 10 seconds
+    if (!triggerAction && now - lastCapturedTimeRef.current > 10000 && (current.elbow > 0 || current.knee > 0)) {
+      triggerAction = true;
+      eventLabel = "Form Check";
+    }
 
     if (triggerAction) {
       lastCapturedTimeRef.current = now;
-      // 100ms settling buffer to let camera exposure adapt to peak posture stability and clear motion blur
+      movementHistoryRef.current = [];
       setTimeout(() => {
         captureSnapshot(eventLabel);
-      }, 100);
+      }, 80);
     }
   }, [smoothedMetrics, config.analysisType, captureSnapshot]);
 
@@ -1378,9 +1305,20 @@ export default function Analysis() {
         
         {/* Left Side: Live Player Feed */}
         <div className="flex flex-col gap-2 min-h-0">
-          <div className="flex items-center gap-2 text-xs font-bold text-foreground uppercase tracking-wider">
-            <Camera className="h-4 w-4 text-orange-500" />
-            <span>Live Player Feed</span>
+          <div className="flex items-center justify-between text-xs font-bold text-foreground uppercase tracking-wider">
+            <div className="flex items-center gap-2">
+              <Camera className="h-4 w-4 text-orange-500" />
+              <span>Live Player Feed</span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => captureSnapshot("Manual Capture")}
+              className="h-7 text-[11px] gap-1.5 font-semibold bg-background/80 hover:bg-primary hover:text-white border-primary/40 rounded-lg shadow-xs transition-all"
+            >
+              <Camera className="h-3.5 w-3.5 text-primary" />
+              Capture Snapshot
+            </Button>
           </div>
           
           <div className={`relative w-full aspect-video bg-card border rounded-xl overflow-hidden transition-all duration-300 flex items-center justify-center ${showGlowPulse ? 'border-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.4)] scale-[1.002]' : 'border-border/60 shadow-sm'}`}>
@@ -1563,40 +1501,118 @@ export default function Analysis() {
       </div>
 
       {/* ── Bottom Section: Auto Snapshot Gallery ── */}
-      <div className="px-6 py-4 bg-muted/40 border-t border-border/60 shrink-0 flex flex-col sm:flex-row items-start sm:items-center gap-4 min-h-[110px]">
+      <div className="px-6 py-3 bg-muted/40 border-t border-border/60 shrink-0 flex flex-col sm:flex-row items-start sm:items-center gap-4 min-h-[105px]">
         <div className="shrink-0 flex flex-col justify-center leading-none text-muted-foreground font-mono font-bold tracking-widest text-[9px] uppercase">
-          <span>AUTO SNAPSHOT</span>
-          <span className="mt-1">GALLERY</span>
+          <span>SNAPSHOT</span>
+          <span className="mt-1 text-primary">GALLERY ({snapshots.length})</span>
         </div>
 
-        <div className="flex-1 flex gap-3 overflow-x-auto pb-1 scrollbar-none">
+        <div className="flex-1 flex gap-3 overflow-x-auto pb-1 scrollbar-none items-center">
           {snapshots.length === 0 ? (
-            <div className="flex items-center text-[10px] font-mono text-muted-foreground/60 italic">
-              No snapshots captured yet. Complete a movement to auto-trigger snapshots.
+            <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground/70 italic">
+              <span>No snapshots captured yet.</span>
+              <button
+                type="button"
+                onClick={() => captureSnapshot("Manual Capture")}
+                className="text-primary hover:underline font-semibold cursor-pointer"
+              >
+                Click here to capture now
+              </button>
             </div>
           ) : (
-            snapshots.map(({ src, label, time }, i) => {
+            snapshots.map((snap, i) => {
               return (
                 <motion.div
                   key={i}
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  className="relative w-28 rounded-lg overflow-hidden border border-border/60 bg-background shrink-0 shadow-sm hover:shadow-md transition-all duration-200 group cursor-pointer"
-                  onClick={() => {
-                    const w = window.open();
-                    if (w) {
-                      w.document.write(`<img src="${src}" style="width:100%;height:100%;object-fit:contain;background:#000;" />`);
-                      w.document.title = `${label} (${time})`;
-                    }
-                  }}
+                  className="relative w-32 rounded-lg overflow-hidden border border-border/60 bg-background shrink-0 shadow-sm hover:shadow-md hover:border-primary/60 transition-all duration-200 group cursor-pointer"
+                  onClick={() => setPreviewSnapshot(snap)}
                 >
-                  <img src={src} className="w-full aspect-video object-cover" alt={label} />
+                  <img src={snap.src} className="w-full aspect-video object-cover" alt={snap.label} />
+                  <div className="absolute inset-x-0 bottom-0 bg-black/80 px-1.5 py-0.5 flex items-center justify-between text-[9px] font-mono text-white">
+                    <span className="truncate max-w-[75px] font-medium">{snap.label}</span>
+                    <span className="text-orange-400 font-bold">{snap.time}</span>
+                  </div>
                 </motion.div>
               );
             })
           )}
         </div>
       </div>
+
+      {/* ── Snapshot Modal Preview ── */}
+      <AnimatePresence>
+        {previewSnapshot && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs"
+            onClick={() => setPreviewSnapshot(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative max-w-2xl w-full bg-card border border-border rounded-xl shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/40">
+                <div className="flex items-center gap-2">
+                  <Camera className="h-4 w-4 text-primary" />
+                  <span className="font-bold text-sm text-foreground">{previewSnapshot.label}</span>
+                  <span className="text-xs font-mono text-muted-foreground">({previewSnapshot.time})</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={previewSnapshot.src}
+                    download={`kinectra-snapshot-${previewSnapshot.label.toLowerCase().replace(/\s+/g, "-")}.webp`}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </a>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 rounded-md"
+                    onClick={() => setPreviewSnapshot(null)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="p-3 bg-black flex justify-center items-center">
+                <img
+                  src={previewSnapshot.src}
+                  alt={previewSnapshot.label}
+                  className="max-h-[60vh] w-auto rounded-lg object-contain shadow-md"
+                />
+              </div>
+
+              {previewSnapshot.metrics && (
+                <div className="px-4 py-2.5 border-t border-border bg-muted/20 flex flex-wrap items-center gap-2 text-xs font-mono text-muted-foreground">
+                  <span className="font-semibold text-foreground">Metrics:</span>
+                  <span className="px-2 py-0.5 rounded bg-muted border border-border/60">
+                    Elbow: <strong className="text-foreground">{previewSnapshot.metrics.elbowAngle}°</strong>
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-muted border border-border/60">
+                    Knee: <strong className="text-foreground">{previewSnapshot.metrics.kneeAngle}°</strong>
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-muted border border-border/60">
+                    Spine: <strong className="text-foreground">{previewSnapshot.metrics.spineTilt}°</strong>
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-muted border border-border/60">
+                    Shoulder: <strong className="text-foreground">{previewSnapshot.metrics.shoulderAlignment}°</strong>
+                  </span>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
