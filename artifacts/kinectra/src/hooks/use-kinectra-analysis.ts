@@ -18,6 +18,9 @@ export interface KinectraMetrics {
   techniqueScore: number;
   warnings: string[];
   bodyDetected: boolean;
+  handSpeed?: number;
+  dominantWristSpeed?: number;
+  isActionActive?: boolean;
 }
 
 export interface KinectraAnalysisResult {
@@ -39,6 +42,9 @@ const DEFAULT_METRICS: KinectraMetrics = {
   techniqueScore: 100,
   warnings: [],
   bodyDetected: false,
+  handSpeed: 0,
+  dominantWristSpeed: 0,
+  isActionActive: false,
 };
 
 function calculateAngle(a: Vector3D, b: Vector3D, c: Vector3D): number {
@@ -66,6 +72,12 @@ export function useKinectraAnalysis(
   const isRunningRef = useRef(false);
   const lastVideoTimeRef = useRef(-1);
   const graphDeadRef = useRef(false); // true after an unrecoverable MediaPipe graph error
+  // Track wrist positions across frames to measure real athletic hand movement velocity
+  const wristHistoryRef = useRef<{
+    time: number;
+    lw: { x: number; y: number };
+    rw: { x: number; y: number };
+  }[]>([]);
   // Throttle: track when we last ran inference
   const lastInferenceTimeRef = useRef(0);
   const FPS_INTERVAL = 1000 / 15; // 15 fps
@@ -112,9 +124,13 @@ export function useKinectraAnalysis(
   const analyzePose = useCallback(
     (landmarks: any[]) => {
       if (!landmarks || landmarks.length === 0) {
+        wristHistoryRef.current = [];
         setMetrics((prev) => ({
           ...prev,
-          bodyDetected: false
+          bodyDetected: false,
+          handSpeed: 0,
+          dominantWristSpeed: 0,
+          isActionActive: false,
         }));
         setRawLandmarks(null);
         return;
@@ -304,6 +320,33 @@ export function useKinectraAnalysis(
         }
       }
 
+      // Measure real-time wrist speed across frames
+      const now = performance.now();
+      let handSpeed = 0;
+      let dominantWristSpeed = 0;
+      if (lWrist && rWrist) {
+        const history = wristHistoryRef.current;
+        if (history.length > 0) {
+          const prev = history[history.length - 1];
+          const dt = (now - prev.time) / 1000;
+          if (dt > 0.02 && dt < 0.6) {
+            const dl = Math.hypot(lWrist.x - prev.lw.x, lWrist.y - prev.lw.y);
+            const dr = Math.hypot(rWrist.x - prev.rw.x, rWrist.y - prev.rw.y);
+            const vl = dl / dt;
+            const vr = dr / dt;
+            dominantWristSpeed = isRight ? vr : vl;
+            handSpeed = Math.max(vl, vr);
+          }
+        }
+        history.push({
+          time: now,
+          lw: { x: lWrist.x, y: lWrist.y },
+          rw: { x: rWrist.x, y: rWrist.y },
+        });
+        if (history.length > 10) history.shift();
+      }
+      const isActionActive = handSpeed >= 0.40;
+
       setMetrics({
         elbowAngle: Math.round(elbowAngle),
         kneeAngle: kneeAngle === -1 ? -1 : Math.round(kneeAngle),
@@ -314,6 +357,9 @@ export function useKinectraAnalysis(
         techniqueScore: Math.max(0, Math.min(100, Math.round(techniqueScore))),
         warnings,
         bodyDetected: true,
+        handSpeed: Math.round(handSpeed * 100) / 100,
+        dominantWristSpeed: Math.round(dominantWristSpeed * 100) / 100,
+        isActionActive,
       });
     },
     [analysisType, dominantHand]

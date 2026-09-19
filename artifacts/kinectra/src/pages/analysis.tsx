@@ -43,7 +43,7 @@ export default function Analysis() {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const cameraInitialisedRef = useRef(false);
 
-  const { isModelLoading, modelError, metrics, startAnalysis, stopAnalysis } =
+  const { isModelLoading, modelError, metrics, rawLandmarks, startAnalysis, stopAnalysis } =
     useKinectraAnalysis(config.analysisType, config.dominantHand);
 
   // ── Temporal Low-Pass Filtering (EMA) ──
@@ -56,7 +56,11 @@ export default function Analysis() {
     techniqueScore: 100,
     warnings: [] as string[],
     bodyDetected: false,
+    handSpeed: 0,
+    isActionActive: false,
   });
+
+  const [actionStatus, setActionStatus] = useState<"idle" | "moving" | "captured">("idle");
 
   useEffect(() => {
     if (!isModelLoading) {
@@ -82,6 +86,8 @@ export default function Analysis() {
           techniqueScore: smoothedTechnique,
           warnings: metrics.warnings,
           bodyDetected: metrics.bodyDetected,
+          handSpeed: metrics.handSpeed ?? 0,
+          isActionActive: metrics.isActionActive ?? false,
         };
       });
     }
@@ -135,8 +141,18 @@ export default function Analysis() {
   });
 
   const lastCapturedTimeRef = useRef<number>(0);
-  const lastSampleTimeRef = useRef<number>(0);
-  const movementHistoryRef = useRef<{ time: number; elbow: number; knee: number; spine: number; shoulder: number }[]>([]);
+  const isActionExecutingRef = useRef<boolean>(false);
+  const actionMotionHistoryRef = useRef<{
+    time: number;
+    handSpeed: number;
+    domWrist: { x: number; y: number };
+    offWrist: { x: number; y: number };
+    domShoulder: { x: number; y: number };
+    domElbow: { x: number; y: number };
+    elbowAngle: number;
+    kneeAngle: number;
+    spineTilt: number;
+  }[]>([]);
 
   // Blends webcam video feed and pose skeleton canvas onto an offline context
   const captureSnapshot = useCallback((eventLabel: string) => {
@@ -207,10 +223,11 @@ export default function Analysis() {
           tCtx.fillText("KINECTRA LABS", 12, targetH - 10);
           
           const displayLabel = eventLabel === "Stance Balance" ? "Stance Check" : eventLabel;
+          const kneeStr = smoothedMetrics.kneeAngle > 0 ? `${Math.round(smoothedMetrics.kneeAngle)}°` : "N/A";
           tCtx.fillStyle = "rgba(255, 255, 255, 0.9)";
           tCtx.font = "10px monospace";
           tCtx.fillText(
-            `• ${displayLabel} | Elbow: ${Math.round(smoothedMetrics.elbowAngle)}° | Knee: ${Math.round(smoothedMetrics.kneeAngle)}° | Spine: ${Math.round(smoothedMetrics.spineTilt)}°`,
+            `• ${displayLabel} | Elbow: ${Math.round(smoothedMetrics.elbowAngle)}° | Knee: ${kneeStr} | Spine: ${Math.round(smoothedMetrics.spineTilt)}°`,
             115,
             targetH - 10
           );
@@ -277,130 +294,187 @@ export default function Analysis() {
     }
   }, [config.sessionId, config.dominantHand, config.analysisMode, frameCount, toast, smoothedMetrics]);
 
-  // Hook to monitor smoothed metrics and trigger snapshot capture ONLY when the user actively performs an athletic action
+  // Hook to monitor real-time hand movements and trigger snapshot capture ONLY when the user actively performs the athletic action
   useEffect(() => {
-    const { elbowAngle, spineTilt, kneeAngle, shoulderAlignment, bodyDetected } = smoothedMetrics;
     const now = Date.now();
-    
-    // Minimum 2.2s spacing between action snapshots to avoid duplicate shots of the same movement
-    if (now - lastCapturedTimeRef.current < 2200) return;
+    const isRight = config.dominantHand === "right";
 
-    // Only proceed if an athlete body is actively detected in frame
-    if (!bodyDetected && elbowAngle === 0) return;
+    // Only proceed if athlete body is detected or in demo mode
+    if (!metrics.bodyDetected && !isDemoMode) {
+      if (actionStatus !== "idle") setActionStatus("idle");
+      return;
+    }
 
-    // Sample metrics every ~120ms to measure true physical velocity across time
-    if (now - lastSampleTimeRef.current < 120) return;
-    lastSampleTimeRef.current = now;
+    // Extract landmarks if available
+    let domWrist = { x: 0.5, y: 0.5 };
+    let offWrist = { x: 0.5, y: 0.5 };
+    let domShoulder = { x: 0.5, y: 0.35 };
+    let domElbow = { x: 0.5, y: 0.45 };
 
-    movementHistoryRef.current.push({
+    if (rawLandmarks && rawLandmarks.length >= 17) {
+      const rw = rawLandmarks[16], lw = rawLandmarks[15];
+      const rs = rawLandmarks[12], ls = rawLandmarks[11];
+      const re = rawLandmarks[14], le = rawLandmarks[13];
+      if (rw && lw) {
+        domWrist = isRight ? { x: rw.x, y: rw.y } : { x: lw.x, y: lw.y };
+        offWrist = isRight ? { x: lw.x, y: lw.y } : { x: rw.x, y: rw.y };
+        domShoulder = (isRight ? rs : ls) || domShoulder;
+        domElbow = (isRight ? re : le) || domElbow;
+      }
+    }
+
+    const currentHandSpeed = metrics.handSpeed ?? (isDemoMode ? (smoothedMetrics.isActionActive ? 0.72 : 0.06) : 0);
+
+    // Record sample in actionMotionHistoryRef
+    actionMotionHistoryRef.current.push({
       time: now,
-      elbow: elbowAngle,
-      knee: kneeAngle,
-      spine: spineTilt,
-      shoulder: shoulderAlignment,
+      handSpeed: currentHandSpeed,
+      domWrist,
+      offWrist,
+      domShoulder,
+      domElbow,
+      elbowAngle: smoothedMetrics.elbowAngle,
+      kneeAngle: smoothedMetrics.kneeAngle,
+      spineTilt: smoothedMetrics.spineTilt,
     });
-    // Keep ~8 samples (approx 1.0 second of motion history)
-    if (movementHistoryRef.current.length > 8) movementHistoryRef.current.shift();
+    // Keep ~1.0s of motion history
+    if (actionMotionHistoryRef.current.length > 15) actionMotionHistoryRef.current.shift();
 
-    if (movementHistoryRef.current.length < 4) return;
+    const history = actionMotionHistoryRef.current;
+    if (history.length < 3) return;
 
-    const history = movementHistoryRef.current;
-    const current = history[history.length - 1];
-    const past = history[0]; // ~400ms - 800ms ago
+    // Windowed analysis over the recent 250ms - 400ms
+    const windowStartIdx = Math.max(0, history.length - 5);
+    const pastSample = history[windowStartIdx];
+    const currentSample = history[history.length - 1];
+    const windowDt = (currentSample.time - pastSample.time) / 1000;
 
-    // Calculate dynamic angular velocity / displacement over the recent movement window
-    const elbowDelta = Math.abs(current.elbow - past.elbow);
-    const kneeDelta = current.knee > 0 && past.knee > 0 ? Math.abs(current.knee - past.knee) : 0;
-    const spineDelta = Math.abs(current.spine - past.spine);
-    const maxActionVelocity = Math.max(elbowDelta, kneeDelta, spineDelta);
+    const domDisplacement = Math.hypot(
+      currentSample.domWrist.x - pastSample.domWrist.x,
+      currentSample.domWrist.y - pastSample.domWrist.y
+    );
+    const offDisplacement = Math.hypot(
+      currentSample.offWrist.x - pastSample.offWrist.x,
+      currentSample.offWrist.y - pastSample.offWrist.y
+    );
+    const maxDisplacement = Math.max(domDisplacement, offDisplacement);
+    const windowVelocity = windowDt > 0.04 ? maxDisplacement / windowDt : 0;
 
-    // ACTION GATE: If the user is stationary, resting, or moving slowly, DO NOT take any photo.
-    // Minimum 12° dynamic angular displacement is required to qualify as an active athletic action.
-    if (maxActionVelocity < 12) return;
+    // ── ACTION GATE: ONLY trigger when user starts performing the action with active hand movement! ──
+    // When stationary, resting, or moving slowly, handSpeed < 0.38 and maxDisplacement < 0.035
+    const isHandsMovingInAction =
+      (currentHandSpeed >= 0.38 && maxDisplacement >= 0.035) ||
+      currentHandSpeed >= 0.55 ||
+      windowVelocity >= 0.45 ||
+      (isDemoMode && currentHandSpeed >= 0.4);
+
+    if (!isHandsMovingInAction) {
+      // User is idle / stationary / resting: STRICTLY NO SNAPSHOTS
+      if (now - lastCapturedTimeRef.current > 700 && actionStatus !== "idle") {
+        setActionStatus("idle");
+      }
+      isActionExecutingRef.current = false;
+      return;
+    }
+
+    // Hands are moving in action!
+    if (actionStatus !== "moving") {
+      setActionStatus("moving");
+    }
+
+    // Minimum cooldown between action captures (1.1s)
+    if (now - lastCapturedTimeRef.current < 1100) return;
+
+    // Avoid double firing in the same single stroke
+    if (isActionExecutingRef.current) return;
 
     let triggerAction = false;
     let eventLabel = "";
 
-    if (config.analysisType === "bowling") {
-      // 1. Bowling Delivery Release: Arm rapidly whip-extends into full overhead delivery release
-      if (current.elbow >= 148 && past.elbow < 135 && elbowDelta >= 15) {
+    const type = config.analysisType;
+
+    if (type === "bowling") {
+      // 1. Delivery Release Apex: Bowling hand reaches overhead/shoulder level with fast movement
+      const isHandHigh = currentSample.domWrist.y < currentSample.domShoulder.y + 0.06;
+      if (isHandHigh && (currentHandSpeed >= 0.40 || windowVelocity >= 0.40)) {
         triggerAction = true;
         eventLabel = "Bowling Release";
       }
-      // 2. Delivery Drive: Torso rapidly flexes forward into the delivery drive follow-through
-      else if (current.spine >= 18 && past.spine < 12 && spineDelta >= 7) {
+      // 2. Delivery Drive / Follow-Through: Arm powers down across torso with high velocity
+      else if (
+        currentSample.domWrist.y > currentSample.domShoulder.y &&
+        pastSample.domWrist.y < pastSample.domShoulder.y + 0.10 &&
+        (currentHandSpeed >= 0.50 || windowVelocity >= 0.45)
+      ) {
         triggerAction = true;
         eventLabel = "Delivery Drive";
       }
-      // 3. Landing Plant: Dynamic knee brace impact during landing stride
-      else if (current.knee > 0 && current.knee >= 115 && current.knee <= 145 && past.knee > current.knee + 10 && kneeDelta >= 10) {
+      // 3. Dynamic Delivery Swing: Any strong bowling arm rotation/throw
+      else if (currentHandSpeed >= 0.65 || windowVelocity >= 0.60) {
         triggerAction = true;
-        eventLabel = "Landing Plant";
+        eventLabel = "Bowling Delivery";
       }
-      // 4. Setup Load: Rapid coil/flexion of the bowling arm prior to delivery swing
-      else if (current.elbow >= 50 && current.elbow <= 95 && past.elbow > current.elbow + 15 && elbowDelta >= 15) {
-        triggerAction = true;
-        eventLabel = "Setup Load";
-      }
-    } else if (config.analysisType === "basketball") {
-      // 1. Release Extension: Shooting arm drives upward into high release
-      if (current.elbow >= 152 && past.elbow < 130 && elbowDelta >= 18) {
+    } else if (type === "basketball") {
+      // 1. Release Extension: Shooting hand reaches overhead with speed
+      const isHandHigh = currentSample.domWrist.y < currentSample.domShoulder.y;
+      if (isHandHigh && (currentHandSpeed >= 0.40 || windowVelocity >= 0.40)) {
         triggerAction = true;
         eventLabel = "Release Extension";
       }
-      // 2. Prep Dip: Dynamic knee flexion loading for jump shot
-      else if (current.knee > 0 && current.knee >= 105 && current.knee <= 135 && past.knee > current.knee + 10 && kneeDelta >= 10) {
-        triggerAction = true;
-        eventLabel = "Prep Dip";
-      }
-      // 3. Follow-Through: Arm finishes high and stabilized after shooting stroke
-      else if (current.spine < 8 && past.elbow >= 150 && elbowDelta >= 10) {
+      // 2. High Follow-Through
+      else if (isHandHigh && currentSample.elbowAngle >= 140) {
         triggerAction = true;
         eventLabel = "Follow-Through";
       }
-    } else if (config.analysisType === "badminton") {
-      // 1. Smash Impact: Overhead arm snaps into smash/clear contact
-      if (current.elbow >= 150 && past.elbow < 130 && elbowDelta >= 18) {
+      else if (currentHandSpeed >= 0.60) {
+        triggerAction = true;
+        eventLabel = "Shooting Stroke";
+      }
+    } else if (type === "badminton") {
+      // 1. Smash Impact: Overhead snap
+      const isHandHigh = currentSample.domWrist.y < currentSample.domShoulder.y;
+      if (isHandHigh && (currentHandSpeed >= 0.42 || windowVelocity >= 0.42)) {
         triggerAction = true;
         eventLabel = "Impact Contact";
       }
-      // 2. Preparation Loading Arch: Fast torso arch preparing for overhead hit
-      else if (current.spine >= 15 && past.spine < 9 && spineDelta >= 6) {
+      // 2. Follow-through smash stroke
+      else if (currentHandSpeed >= 0.55) {
         triggerAction = true;
-        eventLabel = "Preparation Loading";
-      }
-      // 3. Recovery Lunge: Dynamic stride lunge after smash
-      else if (current.knee > 0 && current.knee >= 110 && current.knee <= 140 && kneeDelta >= 10) {
-        triggerAction = true;
-        eventLabel = "Recovery Lunge";
+        eventLabel = "Smash Stroke";
       }
     } else {
       // Cricket Batting:
-      // 1. Front-Foot Drive: Batter steps forward and flexes front knee into the shot
-      if (current.knee > 0 && current.knee <= 135 && past.knee > current.knee + 10 && kneeDelta >= 10) {
-        triggerAction = true;
-        eventLabel = "Front-foot Drive";
+      // 1. Front-Foot Drive: Hands swing forward/downward through the hitting zone with speed
+      const isHandSwinging = currentHandSpeed >= 0.40 || windowVelocity >= 0.38;
+      if (isHandSwinging) {
+        if (currentSample.domWrist.y > pastSample.domWrist.y || maxDisplacement >= 0.06) {
+          triggerAction = true;
+          eventLabel = "Front-foot Drive";
+        } else {
+          triggerAction = true;
+          eventLabel = "Batting Stroke";
+        }
       }
-      // 2. Shot Follow-Through: Bat swings through into high finish
-      else if (current.elbow >= 125 && past.spine > 13 && (elbowDelta >= 15 || spineDelta >= 6)) {
+      // 2. Follow-Through: Finish of the swing
+      else if (currentSample.elbowAngle >= 120 && (currentHandSpeed >= 0.38 || windowVelocity >= 0.38)) {
         triggerAction = true;
         eventLabel = "Follow-through";
-      }
-      // 3. High Backlift: Fast backswing bat lift before playing the stroke
-      else if (current.elbow >= 45 && current.elbow <= 95 && current.shoulder > 14 && past.elbow > current.elbow + 12 && elbowDelta >= 12) {
-        triggerAction = true;
-        eventLabel = "High Backlift";
       }
     }
 
     if (triggerAction) {
       lastCapturedTimeRef.current = now;
-      movementHistoryRef.current = [];
+      isActionExecutingRef.current = true;
+      setActionStatus("captured");
+
+      captureSnapshot(eventLabel);
+
       setTimeout(() => {
-        captureSnapshot(eventLabel);
-      }, 70);
+        setActionStatus("idle");
+        isActionExecutingRef.current = false;
+      }, 750);
     }
-  }, [smoothedMetrics, config.analysisType, captureSnapshot]);
+  }, [rawLandmarks, metrics, config.analysisType, config.dominantHand, captureSnapshot, isDemoMode, smoothedMetrics.elbowAngle, smoothedMetrics.kneeAngle, smoothedMetrics.spineTilt, smoothedMetrics.isActionActive, actionStatus]);
 
   // ── Camera: initialise ONCE ───────────────────────────────────────
   useEffect(() => {
@@ -873,6 +947,18 @@ export default function Analysis() {
           }
         }
 
+        let isDemoAction = false;
+        if (config.analysisType === "bowling") {
+          const phase = Math.floor(step / 10);
+          isDemoAction = phase === 3 || phase === 4;
+        } else if (config.analysisType === "basketball" || config.analysisType === "badminton") {
+          const phase = Math.floor(step / 15);
+          isDemoAction = phase === 1;
+        } else {
+          const phase = Math.floor(step / 10);
+          isDemoAction = phase === 2;
+        }
+
         return {
           elbowAngle: Math.round(elbow),
           kneeAngle: Math.round(knee),
@@ -882,6 +968,8 @@ export default function Analysis() {
           techniqueScore: 88 + Math.round(Math.random() * 8),
           warnings,
           bodyDetected: true,
+          handSpeed: isDemoAction ? 0.72 : 0.06,
+          isActionActive: isDemoAction,
         };
       });
     }, 300);
@@ -1294,15 +1382,31 @@ export default function Analysis() {
         {/* Left Side: Live Player Feed */}
         <div className="flex flex-col gap-2 min-h-0">
           <div className="flex items-center justify-between text-xs font-bold text-foreground uppercase tracking-wider">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Camera className="h-4 w-4 text-orange-500" />
               <span>Live Player Feed</span>
+              {actionStatus === "moving" ? (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse lowercase tracking-normal font-sans">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  Hands Moving • Capturing
+                </span>
+              ) : actionStatus === "captured" ? (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-orange-500/20 text-orange-400 border border-orange-500/40 lowercase tracking-normal font-sans">
+                  <Camera className="w-3 h-3 text-orange-400" />
+                  Snapshot Captured!
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono text-muted-foreground bg-muted/50 border border-border/50 lowercase tracking-normal font-normal">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                  Ready • Move hands to capture
+                </span>
+              )}
             </div>
             <Button
               size="sm"
               variant="outline"
               onClick={() => captureSnapshot("Manual Capture")}
-              className="h-7 text-[11px] gap-1.5 font-semibold bg-background/80 hover:bg-primary hover:text-white border-primary/40 rounded-lg shadow-xs transition-all"
+              className="h-7 text-[11px] gap-1.5 font-semibold bg-background/80 hover:bg-primary hover:text-white border-primary/40 rounded-lg shadow-xs transition-all shrink-0"
             >
               <Camera className="h-3.5 w-3.5 text-primary" />
               Capture Snapshot
