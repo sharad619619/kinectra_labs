@@ -277,19 +277,19 @@ export default function Analysis() {
     }
   }, [config.sessionId, config.dominantHand, config.analysisMode, frameCount, toast, smoothedMetrics]);
 
-  // Hook to monitor smoothed metrics and trigger snapshot capture on athletic phase transitions
+  // Hook to monitor smoothed metrics and trigger snapshot capture ONLY when the user actively performs an athletic action
   useEffect(() => {
     const { elbowAngle, spineTilt, kneeAngle, shoulderAlignment, bodyDetected } = smoothedMetrics;
     const now = Date.now();
     
-    // Minimum 2.5s spacing between automatic snapshots
-    if (now - lastCapturedTimeRef.current < 2500) return;
+    // Minimum 2.2s spacing between action snapshots to avoid duplicate shots of the same movement
+    if (now - lastCapturedTimeRef.current < 2200) return;
 
-    // Only sample if person is detected in frame or has valid joint angles
+    // Only proceed if an athlete body is actively detected in frame
     if (!bodyDetected && elbowAngle === 0) return;
 
-    // Sample metrics every ~150ms instead of every raw animation frame
-    if (now - lastSampleTimeRef.current < 150) return;
+    // Sample metrics every ~120ms to measure true physical velocity across time
+    if (now - lastSampleTimeRef.current < 120) return;
     lastSampleTimeRef.current = now;
 
     movementHistoryRef.current.push({
@@ -299,110 +299,98 @@ export default function Analysis() {
       spine: spineTilt,
       shoulder: shoulderAlignment,
     });
-    if (movementHistoryRef.current.length > 12) movementHistoryRef.current.shift();
+    // Keep ~8 samples (approx 1.0 second of motion history)
+    if (movementHistoryRef.current.length > 8) movementHistoryRef.current.shift();
 
-    if (movementHistoryRef.current.length < 3) return;
+    if (movementHistoryRef.current.length < 4) return;
 
     const history = movementHistoryRef.current;
     const current = history[history.length - 1];
-    const prev = history[history.length - 2];
-    const past = history[0];
+    const past = history[0]; // ~400ms - 800ms ago
+
+    // Calculate dynamic angular velocity / displacement over the recent movement window
+    const elbowDelta = Math.abs(current.elbow - past.elbow);
+    const kneeDelta = current.knee > 0 && past.knee > 0 ? Math.abs(current.knee - past.knee) : 0;
+    const spineDelta = Math.abs(current.spine - past.spine);
+    const maxActionVelocity = Math.max(elbowDelta, kneeDelta, spineDelta);
+
+    // ACTION GATE: If the user is stationary, resting, or moving slowly, DO NOT take any photo.
+    // Minimum 12° dynamic angular displacement is required to qualify as an active athletic action.
+    if (maxActionVelocity < 12) return;
 
     let triggerAction = false;
     let eventLabel = "";
 
     if (config.analysisType === "bowling") {
-      // 1. Setup Load (Elbow deeply flexed/cocked at chest/chin)
-      if (current.elbow >= 50 && current.elbow <= 95 && current.spine < 14) {
-        if (Math.abs(current.elbow - prev.elbow) < 6 && past.elbow > current.elbow + 8) {
-          triggerAction = true;
-          eventLabel = "Setup Load";
-        }
-      }
-      // 2. Bowling Release (Arm reaching full overhead extension)
-      else if (current.elbow >= 152 && past.elbow < 135) {
+      // 1. Bowling Delivery Release: Arm rapidly whip-extends into full overhead delivery release
+      if (current.elbow >= 148 && past.elbow < 135 && elbowDelta >= 15) {
         triggerAction = true;
         eventLabel = "Bowling Release";
       }
-      // 3. Landing Plant (Front landing knee bracing impact)
-      else if (current.knee > 0 && current.knee >= 115 && current.knee <= 145 && past.knee > current.knee + 8) {
-        triggerAction = true;
-        eventLabel = "Landing Plant";
-      }
-      // 4. Delivery Drive (Forward spine flexion follow-through)
-      else if (current.spine >= 18 && past.spine < 12) {
+      // 2. Delivery Drive: Torso rapidly flexes forward into the delivery drive follow-through
+      else if (current.spine >= 18 && past.spine < 12 && spineDelta >= 7) {
         triggerAction = true;
         eventLabel = "Delivery Drive";
       }
-      // 5. Bowling Stance
-      else if (current.elbow >= 80 && current.elbow <= 130 && current.spine < 12 && Math.abs(current.elbow - past.elbow) < 5) {
-        if (now - lastCapturedTimeRef.current > 7000) {
-          triggerAction = true;
-          eventLabel = "Bowling Stance";
-        }
+      // 3. Landing Plant: Dynamic knee brace impact during landing stride
+      else if (current.knee > 0 && current.knee >= 115 && current.knee <= 145 && past.knee > current.knee + 10 && kneeDelta >= 10) {
+        triggerAction = true;
+        eventLabel = "Landing Plant";
+      }
+      // 4. Setup Load: Rapid coil/flexion of the bowling arm prior to delivery swing
+      else if (current.elbow >= 50 && current.elbow <= 95 && past.elbow > current.elbow + 15 && elbowDelta >= 15) {
+        triggerAction = true;
+        eventLabel = "Setup Load";
       }
     } else if (config.analysisType === "basketball") {
-      // 1. Prep Dip
-      if (current.knee > 0 && current.knee >= 105 && current.knee <= 135 && past.knee > current.knee + 8) {
-        triggerAction = true;
-        eventLabel = "Prep Dip";
-      }
-      // 2. Release Extension
-      else if (current.elbow >= 155 && past.elbow < 130) {
+      // 1. Release Extension: Shooting arm drives upward into high release
+      if (current.elbow >= 152 && past.elbow < 130 && elbowDelta >= 18) {
         triggerAction = true;
         eventLabel = "Release Extension";
       }
-      // 3. Follow-Through
-      else if (current.spine < 8 && past.elbow >= 150) {
+      // 2. Prep Dip: Dynamic knee flexion loading for jump shot
+      else if (current.knee > 0 && current.knee >= 105 && current.knee <= 135 && past.knee > current.knee + 10 && kneeDelta >= 10) {
+        triggerAction = true;
+        eventLabel = "Prep Dip";
+      }
+      // 3. Follow-Through: Arm finishes high and stabilized after shooting stroke
+      else if (current.spine < 8 && past.elbow >= 150 && elbowDelta >= 10) {
         triggerAction = true;
         eventLabel = "Follow-Through";
       }
     } else if (config.analysisType === "badminton") {
-      // 1. Preparation Loading (Arch)
-      if (current.spine >= 15 && past.spine < 10) {
-        triggerAction = true;
-        eventLabel = "Preparation Loading";
-      }
-      // 2. Impact Contact
-      else if (current.elbow >= 150 && past.elbow < 130) {
+      // 1. Smash Impact: Overhead arm snaps into smash/clear contact
+      if (current.elbow >= 150 && past.elbow < 130 && elbowDelta >= 18) {
         triggerAction = true;
         eventLabel = "Impact Contact";
       }
-      // 3. Recovery Lunge
-      else if (current.knee > 0 && current.knee >= 110 && current.knee <= 140) {
+      // 2. Preparation Loading Arch: Fast torso arch preparing for overhead hit
+      else if (current.spine >= 15 && past.spine < 9 && spineDelta >= 6) {
+        triggerAction = true;
+        eventLabel = "Preparation Loading";
+      }
+      // 3. Recovery Lunge: Dynamic stride lunge after smash
+      else if (current.knee > 0 && current.knee >= 110 && current.knee <= 140 && kneeDelta >= 10) {
         triggerAction = true;
         eventLabel = "Recovery Lunge";
       }
     } else {
-      // Batting:
-      // 1. High Backlift
-      if (current.elbow >= 45 && current.elbow <= 95 && current.shoulder > 14 && past.elbow > current.elbow + 6) {
-        triggerAction = true;
-        eventLabel = "High Backlift";
-      }
-      // 2. Front-foot Drive
-      else if (current.knee > 0 && current.knee <= 135 && past.knee > current.knee + 8) {
+      // Cricket Batting:
+      // 1. Front-Foot Drive: Batter steps forward and flexes front knee into the shot
+      if (current.knee > 0 && current.knee <= 135 && past.knee > current.knee + 10 && kneeDelta >= 10) {
         triggerAction = true;
         eventLabel = "Front-foot Drive";
       }
-      // 3. Follow-through
-      else if (current.spine < 10 && current.elbow > 130 && past.spine > 14) {
+      // 2. Shot Follow-Through: Bat swings through into high finish
+      else if (current.elbow >= 125 && past.spine > 13 && (elbowDelta >= 15 || spineDelta >= 6)) {
         triggerAction = true;
         eventLabel = "Follow-through";
       }
-      // 4. Stance Setup
-      else if (current.knee >= 135 && current.knee <= 155 && current.spine >= 10 && current.spine <= 20) {
-        if (now - lastCapturedTimeRef.current > 7000) {
-          triggerAction = true;
-          eventLabel = "Stance Setup";
-        }
+      // 3. High Backlift: Fast backswing bat lift before playing the stroke
+      else if (current.elbow >= 45 && current.elbow <= 95 && current.shoulder > 14 && past.elbow > current.elbow + 12 && elbowDelta >= 12) {
+        triggerAction = true;
+        eventLabel = "High Backlift";
       }
-    }
-
-    // Periodic technique snapshot if active motion is detected but no specific phase fired in 10 seconds
-    if (!triggerAction && now - lastCapturedTimeRef.current > 10000 && (current.elbow > 0 || current.knee > 0)) {
-      triggerAction = true;
-      eventLabel = "Form Check";
     }
 
     if (triggerAction) {
@@ -410,7 +398,7 @@ export default function Analysis() {
       movementHistoryRef.current = [];
       setTimeout(() => {
         captureSnapshot(eventLabel);
-      }, 80);
+      }, 70);
     }
   }, [smoothedMetrics, config.analysisType, captureSnapshot]);
 
